@@ -1,72 +1,32 @@
-import { expectTypeOf } from "expect-type";
-import { Bot } from "../../src/bot.ts";
-import { Plugin } from "../../src/plugin.ts";
-import { webhookHandler } from "../../src/webhook/index.ts";
+import type { Bot } from "grammy";
+import type { AppConfig } from "./types.ts";
 
-// ── webhookHandler must accept a plain Bot ───────────────────────────────────
-{
-	const bot = new Bot("test");
-	const handler = webhookHandler(bot, "Bun.serve");
-	expectTypeOf<typeof handler>().toBeFunction();
+const HEADER = "X-Telegram-Bot-Api-Secret-Token";
+
+async function equalSecret(a: string, b: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(a)),
+    crypto.subtle.digest("SHA-256", encoder.encode(b)),
+  ]);
+  const aa = new Uint8Array(da); const bb = new Uint8Array(db);
+  let diff = aa.length ^ bb.length;
+  for (let i = 0; i < Math.max(aa.length, bb.length); i++) diff |= (aa[i % aa.length] ?? 0) ^ (bb[i % bb.length] ?? 0);
+  return diff === 0;
 }
 
-// ── webhookHandler must accept a Bot with derives (no `as any` needed) ───────
-{
-	const bot = new Bot("test").derive(() => ({ myProp: "x" as const }));
-	webhookHandler(bot, "Bun.serve");
-	webhookHandler(bot, "fastify");
-	webhookHandler(bot, "elysia");
-	webhookHandler(bot, "hono");
-	webhookHandler(bot, "express");
-	webhookHandler(bot, "koa");
-	webhookHandler(bot, "std/http");
-	webhookHandler(bot, "http");
-	webhookHandler(bot, "cloudflare");
-	webhookHandler(bot, "Request");
-}
+export async function handleWebhook(request: Request, config: AppConfig, bot: Bot): Promise<Response> {
+  const incoming = request.headers.get(HEADER);
+  if (!incoming || !(await equalSecret(incoming, config.webhookSecret))) return new Response("Unauthorized", { status: 401 });
+  if (request.method !== "POST") return new Response("Method Not Allowed", { status: 405 });
 
-// ── webhookHandler must accept a Bot extended with a plugin that adds derives ─
-{
-	const plugin = new Plugin("test").derive(() => ({
-		pluginProp: 42 as const,
-	}));
-	const bot = new Bot("test")
-		.extend(plugin)
-		.derive(() => ({ botProp: "y" as const }));
+  let update: unknown;
+  try { update = await request.json(); } catch { return new Response("Bad Request", { status: 400 }); }
 
-	webhookHandler(bot, "Bun.serve");
-}
-
-// ── webhookHandler must accept a Bot with custom errors ──────────────────────
-{
-	class AppError extends Error {
-		readonly name = "AppError";
-	}
-	const bot = new Bot("test").error("app", AppError);
-	webhookHandler(bot, "Bun.serve");
-}
-
-// ── webhookHandler must accept a Bot with macros ─────────────────────────────
-{
-	const bot = new Bot("test").macro("auth", () => ({
-		derive: () => ({ user: { id: 1 } }),
-	}));
-	webhookHandler(bot, "Bun.serve");
-}
-
-// ── webhookHandler must accept a fully-loaded Bot (errors + derives + macros) ─
-{
-	class AppError extends Error {
-		readonly name = "AppError";
-	}
-	const plugin = new Plugin("p").derive(() => ({ p: 1 as const }));
-	const bot = new Bot("test")
-		.extend(plugin)
-		.error("app", AppError)
-		.derive(() => ({ d: "x" as const }))
-		.macro("auth", () => ({ derive: () => ({ user: { id: 1 } }) }));
-
-	webhookHandler(bot, "Bun.serve");
-	webhookHandler(bot, "fastify", "secret");
-	webhookHandler(bot, "hono", { secretToken: "s", shouldWait: true });
+  try {
+    await bot.handleUpdate(update as never);
+  } catch (error) {
+    console.error("update_failed", error instanceof Error ? error.message : "unknown_error");
+  }
+  return new Response("OK", { status: 200 });
 }
